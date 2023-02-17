@@ -94,8 +94,9 @@ def process_game_state(game_state, embedding):
 
 def compute_loss(model, optimizer, target_model, states, actions, rewards, next_states, dones, batch_size, gamma, device):
     # Convert states and next states to embeddings
-    state_embeddings = torch.stack([process_game_state(state, model) for state in states]).to(device)
-    next_state_embeddings = torch.stack([process_game_state(state, model) for state in next_states]).to(device)
+    embedding = model.embedding
+    state_embeddings = torch.stack([process_game_state(state, embedding) for state in states]).to(device)
+    next_state_embeddings = torch.stack([process_game_state(state, embedding) for state in next_states]).to(device)
 
     # Compute Q-values for current states and next states
     current_Q = model(state_embeddings).gather(1, actions)
@@ -112,9 +113,12 @@ def compute_loss(model, optimizer, target_model, states, actions, rewards, next_
 
     return loss.item()
 
+
 def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_decay, target_update_frequency, device):
-    replay_buffer = ReplayBuffer()
+    replay_buffer = ReplayBuffer(buffer_size=10000)
+
     target_agent = copy.deepcopy(agent)
+    target_agent.to(device)
 
     optimizer = torch.optim.Adam(agent.parameters())
 
@@ -131,15 +135,18 @@ def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_d
             # add experience to replay buffer
             replay_buffer.add(state, action, reward, next_state, done)
 
+            state = next_state
+
             # update agent
             if len(replay_buffer) >= batch_size:
-                loss = compute_loss(agent, optimizer, target_agent, replay_buffer, batch_size, gamma, device)
+                states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+                loss = compute_loss(agent, optimizer, target_agent, states, actions, rewards, next_states, dones, batch_size, gamma, device)
                 update_target(agent, target_agent, target_update_frequency)
-
-            state = next_state
 
         # update epsilon for next episode
         eps = max(eps_end, eps_decay * eps)
+
+
 
 
 def update_target(model, target_model):
