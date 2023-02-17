@@ -92,10 +92,7 @@ def process_game_state(game_state, embedding):
 
     return game_state_embedding
 
-def compute_loss(model, optimizer, target_model, replay_buffer, batch_size, gamma, device):
-    # Sample a batch from the replay buffer
-    states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
-
+def compute_loss(model, optimizer, target_model, states, actions, rewards, next_states, dones, batch_size, gamma, device):
     # Convert states and next states to embeddings
     state_embeddings = torch.stack([process_game_state(state, model) for state in states]).to(device)
     next_state_embeddings = torch.stack([process_game_state(state, model) for state in next_states]).to(device)
@@ -115,7 +112,7 @@ def compute_loss(model, optimizer, target_model, replay_buffer, batch_size, gamm
 
     return loss.item()
 
-def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_decay, target_update_frequency):
+def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_decay, target_update_frequency, device):
     replay_buffer = ReplayBuffer()
     target_agent = copy.deepcopy(agent)
 
@@ -136,13 +133,14 @@ def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_d
 
             # update agent
             if len(replay_buffer) >= batch_size:
-                loss = compute_loss(agent, optimizer, target_agent, replay_buffer, batch_size, gamma)
+                loss = compute_loss(agent, optimizer, target_agent, replay_buffer, batch_size, gamma, device)
                 update_target(agent, target_agent, target_update_frequency)
 
             state = next_state
 
         # update epsilon for next episode
         eps = max(eps_end, eps_decay * eps)
+
 
 def update_target(model, target_model):
     target_model.load_state_dict(model.state_dict())
