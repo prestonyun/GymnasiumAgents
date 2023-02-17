@@ -15,6 +15,25 @@ class HolographicEmbeddingLayer(torch.nn.Module):
 
         return holo_embedding
 
+    def run_epoch(model, dataloader, optimizer, device):
+        model.train()
+
+        for batch in dataloader:
+            # move batch to device
+            batch = batch.to(device)
+
+            # forward pass
+            output = model(batch)
+
+            # compute loss
+            loss = output#compute_loss(output)
+
+            # backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+
 class GameStateDataset(torch.utils.data.Dataset):
     def __init__(self, game_states):
         self.game_states = game_states
@@ -37,3 +56,4 @@ class Collator:
         tensor = self.model.holographic_embedding(tensor)
         
         return tensor
+
