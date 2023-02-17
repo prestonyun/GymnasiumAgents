@@ -1,3 +1,6 @@
+from collections import deque
+import copy
+import random
 import torch
 
 class HolographicEmbeddingLayer(torch.nn.Module):
@@ -43,6 +46,22 @@ class Collator:
         location_embedded = self.embedding(location_tensor)
         
         return health_embedded, energy_embedded, location_embedded
+
+class ReplayBuffer:
+    def __init__(self, buffer_size):
+        self.buffer_size = buffer_size
+        self.buffer = deque(maxlen=buffer_size)
+
+    def add(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return states, actions, rewards, next_states, dones
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 def run_epoch(model, dataloader, optimizer, device):
@@ -95,3 +114,35 @@ def compute_loss(model, optimizer, target_model, replay_buffer, batch_size, gamm
     optimizer.step()
 
     return loss.item()
+
+def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_decay, target_update_frequency):
+    replay_buffer = ReplayBuffer()
+    target_agent = copy.deepcopy(agent)
+
+    optimizer = torch.optim.Adam(agent.parameters())
+
+    eps = eps_start
+    for episode in range(num_episodes):
+        state = env.reset()
+        done = False
+
+        while not done:
+            # choose action
+            action = agent.act(state, eps)
+            # take step in environment
+            next_state, reward, done, info = env.step(action)
+            # add experience to replay buffer
+            replay_buffer.add(state, action, reward, next_state, done)
+
+            # update agent
+            if len(replay_buffer) >= batch_size:
+                loss = compute_loss(agent, optimizer, target_agent, replay_buffer, batch_size, gamma)
+                update_target(agent, target_agent, target_update_frequency)
+
+            state = next_state
+
+        # update epsilon for next episode
+        eps = max(eps_end, eps_decay * eps)
+
+def update_target(model, target_model):
+    target_model.load_state_dict(model.state_dict())
