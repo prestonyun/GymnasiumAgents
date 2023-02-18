@@ -1,7 +1,9 @@
+from ast import Tuple
 from collections import deque
 import copy
 import random
 import torch
+import numpy as np
 
 class HolographicEmbeddingLayer(torch.nn.Module):
     def __init__(self, vocab_size, embedding_dim):
@@ -55,10 +57,17 @@ class ReplayBuffer:
     def add(self, state, action, reward, next_state, done):
         self.buffer.append((state, action, reward, next_state, done))
 
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
-        return states, actions, rewards, next_states, dones
+    def sample(self, batch_size: int) -> Tuple[np.ndarray]:
+        batch = np.random.choice(len(self.buffer), batch_size, replace=False)
+        states, actions, rewards, next_states, dones = [], [], [], [], []
+        for i in batch:
+            s, a, r, s2, d = self.buffer[i]
+            states.append(np.array(s, copy=False))
+            actions.append(np.array(a, copy=False))
+            rewards.append(np.array(r, copy=False))
+            next_states.append(np.array(s2, copy=False))
+            dones.append(np.array(d, copy=False))
+        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones)
 
     def __len__(self):
         return len(self.buffer)
@@ -124,7 +133,7 @@ def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_d
 
     eps = eps_start
     for episode in range(num_episodes):
-        state = env.reset()
+        state = env.get_initial_state()
         done = False
 
         while not done:
@@ -135,19 +144,24 @@ def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_d
             # add experience to replay buffer
             replay_buffer.add(state, action, reward, next_state, done)
 
-            state = next_state
-
             # update agent
             if len(replay_buffer) >= batch_size:
                 states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
                 loss = compute_loss(agent, optimizer, target_agent, states, actions, rewards, next_states, dones, batch_size, gamma, device)
                 update_target(agent, target_agent, target_update_frequency)
 
+            state = next_state
+
+            if done:
+                replay_buffer.add(state, None, reward, None, done)
+
+        if len(replay_buffer) >= batch_size:
+            states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
+            loss = compute_loss(agent, optimizer, target_agent, states, actions, rewards, next_states, dones, gamma)
+            update_target(agent, target_agent, target_update_frequency)
+
         # update epsilon for next episode
         eps = max(eps_end, eps_decay * eps)
-
-
-
 
 def update_target(model, target_model):
     target_model.load_state_dict(model.state_dict())
