@@ -16,9 +16,14 @@ class HolographicEmbeddingLayer(torch.nn.Module):
         self.weights = torch.nn.Parameter(torch.randn(vocab_size, embedding_dim))
 
     def forward(self, input_indices):
+        # Get the embeddings for the input indices
         input_embeddings = self.weights[input_indices]
+
+        # Normalize the embeddings
         norm = torch.norm(input_embeddings, dim=1, keepdim=True)
         input_embeddings = input_embeddings / norm
+
+        # Sum the normalized embeddings for all words in the input
         holo_embedding = torch.sum(input_embeddings, dim=0, keepdim=True)
 
         return holo_embedding
@@ -58,19 +63,33 @@ class GameStateDataset(torch.utils.data.Dataset):
 
 class Collator:
     def __init__(self, embedding):
+        """Initialize the class.
+
+        Args:
+            embedding: The embedding layer.
+        """
         self.embedding = embedding
 
     def __call__(self, batch):
+        """Convert a batch of data into tensors.
+
+        Args:
+            batch: A list of data points.
+        """
+        # Unpack the batch into health, energy, and location.
         health, energy, location = zip(*batch)
 
+        # Convert the data into tensors.
         health_tensor = torch.tensor(health)
         energy_tensor = torch.tensor(energy)
         location_tensor = torch.tensor(location)
 
+        # Embed the data.
         health_embedded = self.embedding(health_tensor)
         energy_embedded = self.embedding(energy_tensor)
         location_embedded = self.embedding(location_tensor)
         
+        # Return the embedded data.
         return health_embedded, energy_embedded, location_embedded
 
 
