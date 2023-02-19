@@ -1,6 +1,6 @@
 from typing import Tuple
 from collections import deque
-from replaybuffer import ReplayBuffer
+from common.replaybuffer import ReplayBuffer
 
 import copy
 import random
