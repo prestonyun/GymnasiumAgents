@@ -1,6 +1,6 @@
 from typing import Tuple
 from collections import deque
-from common.replaybuffer import ReplayBuffer
+from rldreamer.bin.replaybuffer import ReplayBuffer
 
 import copy
 import random

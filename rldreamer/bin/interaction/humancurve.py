@@ -1,8 +1,8 @@
 import pytweening
 import numpy as np
 import random
-from _utils import isListOfPoints, isNumeric
-from common._beziercurve import BezierCurve
+from rldreamer.bin._utils import isListOfPoints, isNumeric
+from bin.interaction._beziercurve import BezierCurve
 
 class HumanCurve():
     """
