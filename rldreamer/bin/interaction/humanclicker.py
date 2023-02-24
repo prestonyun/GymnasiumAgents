@@ -1,5 +1,6 @@
 import pyautogui
-from common.humancurve import HumanCurve
+
+from . import HumanCurve
 
 def setup_pyautogui():
     # Any duration less than this is rounded to 0.0 to instantly move the mouse.
