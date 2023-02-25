@@ -190,7 +190,7 @@ def compute_loss(model, optimizer, target_model, states, actions, rewards, next_
 
 
 def train(agent, env, num_episodes, batch_size, gamma, eps_start, eps_end, eps_decay, target_update_frequency, device):
-    replay_buffer = replaybuffer.ReplayBuffer(buffer_size=10000)
+    replay_buffer = ReplayBuffer(buffer_size=10000)
 
     target_agent = copy.deepcopy(agent)
     target_agent.to(device)

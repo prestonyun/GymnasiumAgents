@@ -6,19 +6,15 @@ from torch import nn
 from torch import optim
 from bin.nets import holographic_attn
 from bin import dqnagent
-
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-
-torch.cuda.set_per_process_memory_fraction(0.5, device=0)
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.deterministic = True
+import torch.nn.functional as F
 
 # Define the environment
 env = gym.make('CartPole-v1')
 obs_dim = env.observation_space.shape[0]
 n_actions = env.action_space.n
+
+
+
 
 # Define the reinforcement learning algorithm
 class DQN(nn.Module):
@@ -31,7 +27,8 @@ class DQN(nn.Module):
 
         # Define the Q-network architecture (e.g. using a hybrid transformer-RNN)
         self.transformer_rnn = TransformerRNN(obs_dim=obs_dim, key_dim=64, hidden_dim=hidden_dim, n_layers=2)
-        self.holographic_nn = holographic_attn.HolographicAttentionNetwork(key_dim=64, value_dim=hidden_dim, num_slots=256)
+        #self.holographic_nn = holographic_attn.HolographicAttentionNetwork(key_dim=64, value_dim=hidden_dim, num_slots=256)
+        self.holographic_nn = holographic_attn.DuelingQNetwork(obs_dim, n_actions)
 
         self.fc = nn.Linear(hidden_dim, n_actions)
 
@@ -112,7 +109,6 @@ class TransformerRNN(nn.Module):
         return key_vectors, value_vectors
 
 
-
 # Train the network
 def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_start, epsilon_end, epsilon_decay):
     rewards = []
@@ -182,14 +178,14 @@ obs_dim = env.observation_space.shape[0]
 n_actions = env.action_space.n
 key_dim = 128
 value_dim = 128
-hidden_dim = 8
+hidden_dim = 1
 learning_rate = 1e-3
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 agent = dqnagent.DQNAgent(key_dim, value_dim, n_actions, hidden_dim, learning_rate, device)
 transformer_rnn = TransformerRNN(obs_dim, hidden_dim, hidden_dim, 1).to(device)
 
 # Evaluate the learned policy for 100 episodes
-num_episodes = 1000
+num_episodes = 100
 total_reward = 0
 
 for episode in range(num_episodes):
@@ -201,7 +197,7 @@ for episode in range(num_episodes):
         with torch.no_grad():
             obs_tensor = torch.from_numpy(np.copy(obs)).unsqueeze(0).to(device)
             key_vectors, value_vectors = transformer_rnn(obs_tensor)
-            
+            print(key_vectors, value_vectors)
             q_values = agent.q_network(key_vectors, value_vectors)
             action = q_values.argmax().item()
 

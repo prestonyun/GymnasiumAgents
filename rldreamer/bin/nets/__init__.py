@@ -1,3 +1,3 @@
 from .holographic_transformer import HolographicTransformer
-from .holographic_attn import HolographicAttentionNetwork
+#from .holographic_attn import HolographicAttentionNetwork, DuelingQNetwork
 from .replaybuffer import ReplayBuffer
