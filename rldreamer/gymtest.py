@@ -4,8 +4,16 @@ import torch
 import math
 from torch import nn
 from torch import optim
-from collections import deque
-from rldreamer.bin.nets import holographic_attn
+from bin.nets import holographic_attn
+from bin import dqnagent
+
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+torch.cuda.set_per_process_memory_fraction(0.5, device=0)
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # Define the environment
 env = gym.make('CartPole-v1')
@@ -75,29 +83,34 @@ class DQN(nn.Module):
 
 # Define the observation function
 class TransformerRNN(nn.Module):
-    def __init__(self, obs_dim, key_dim, hidden_dim, n_layers):
+    def __init__(self, input_dim, hidden_dim, num_heads, num_layers, dropout_prob=0.2):
         super(TransformerRNN, self).__init__()
-
-        self.obs_dim = obs_dim
-        self.key_dim = key_dim
+        
+        self.self_attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout_prob)
+        self.dropout = nn.Dropout(p=dropout_prob)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(nn.Linear(hidden_dim, hidden_dim * 4), nn.ReLU(), nn.Linear(hidden_dim * 4, hidden_dim))
+        self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        self.n_layers = n_layers
-
-        # Define the self-attention layer
-        self.self_attn = nn.MultiheadAttention(embed_dim=obs_dim, kdim=key_dim, vdim=hidden_dim, num_heads=4)
-
-        # Define the RNN layers
-        self.rnn = nn.LSTM(input_size=hidden_dim, hidden_size=hidden_dim, num_layers=n_layers, batch_first=True)
-
+        
     def forward(self, obs):
-        # Compute the key vectors using the self-attention layer
-        key_vectors, _ = self.self_attn(obs, obs, obs)
+        if obs.ndim == 2:
+            # If the input tensor has only two dimensions, add a batch dimension
+            obs = obs.unsqueeze(0)
 
-        # Pass the key vectors through the RNN layers to capture the temporal dynamics
-        _, (h, c) = self.rnn(key_vectors)
+        # Compute the GRU embeddings of the input sequence
+        gru_embeddings, hidden = self.gru(obs)
 
-        # Return the final hidden state of the RNN layers as the output
-        return h[-1]
+        # Compute the self-attention vectors by passing the GRU embeddings through the self-attention layer
+        key_vectors, _ = self.self_attn(gru_embeddings, gru_embeddings, gru_embeddings)
+
+        # Pass the key vectors through a feedforward network to obtain the value vectors
+        value_vectors = self.ffn(key_vectors)
+
+        return key_vectors, value_vectors
+
 
 
 # Train the network
@@ -163,3 +176,42 @@ def generate_policy(env, agent, transformer_rnn, h_anet, device):
 
     return
 
+# Initialize the environment and the agent
+env = gym.make('CartPole-v1')
+obs_dim = env.observation_space.shape[0]
+n_actions = env.action_space.n
+key_dim = 128
+value_dim = 128
+hidden_dim = 8
+learning_rate = 1e-3
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+agent = dqnagent.DQNAgent(key_dim, value_dim, n_actions, hidden_dim, learning_rate, device)
+transformer_rnn = TransformerRNN(obs_dim, hidden_dim, hidden_dim, 1).to(device)
+
+# Evaluate the learned policy for 100 episodes
+num_episodes = 1000
+total_reward = 0
+
+for episode in range(num_episodes):
+    obs = env.reset()[0]
+    done = False
+
+    while not done:
+        # Take the action with the highest Q-value
+        with torch.no_grad():
+            obs_tensor = torch.from_numpy(np.copy(obs)).unsqueeze(0).to(device)
+            key_vectors, value_vectors = transformer_rnn(obs_tensor)
+            
+            q_values = agent.q_network(key_vectors, value_vectors)
+            action = q_values.argmax().item()
+
+        # Step the environment and accumulate the reward
+        obs, reward, done, _, _ = env.step(action)
+        total_reward += reward
+
+    # Print the total reward for the episode
+    print(f"Episode {episode}: total reward = {total_reward}")
+    total_reward = 0
+
+# Close the environment
+env.close()

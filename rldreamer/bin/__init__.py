@@ -3,4 +3,4 @@ from . import interaction
 
 from .actionperformer import ActionPerformer
 from .actionset import ActionSet
-from .replaybuffer import ReplayBuffer
+from .dqnagent import DQNAgent
