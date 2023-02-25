@@ -102,22 +102,63 @@ def generate_policy(env, agent, transformer_rnn, h_anet, device):
 
     return
 
+class DQN(nn.Module):
+    def __init__(self, obs_dim, n_actions, hidden_dim=128):
+        super(DQN, self).__init__()
 
+        self.fc1 = nn.Linear(obs_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, n_actions)
+
+        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        self.loss_fn = nn.MSELoss()
+
+    def forward(self, obs):
+        x = F.relu(self.fc1(obs))
+        x = F.relu(self.fc2(x))
+        q_values = self.fc3(x)
+        return q_values
+
+    
+class DuelingQNetwork(nn.Module):
+    def __init__(self, key_dim, value_dim, n_actions, hidden_dim):
+        super(DuelingQNetwork, self).__init__()
+        self.fc1 = nn.Linear(key_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, n_actions)
+        self.fc3 = nn.Linear(value_dim, n_actions)
+
+    def forward(self, key_vectors, value_vectors):
+        x = F.relu(self.fc1(key_vectors))
+        advantage = self.fc2(x)
+        value = self.fc3(value_vectors)
+        q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+        return q_values
+
+
+    
 class DQNAgent:
     def __init__(self, key_dim, value_dim, n_actions, hidden_dim, learning_rate, device):
-        
-        #self.q_network = HolographicAttentionNetwork(4, key_dim, value_dim, 2, n_actions).to(device)
-        #self.target_network = HolographicAttentionNetwork(4, key_dim, value_dim, 2, n_actions).to(device)
-        self.q_network = DuelingQNetwork(4, n_actions).to(device)
-        self.target_network = DuelingQNetwork(4, n_actions).to(device)
-
+        self.q_network = DuelingQNetwork(key_dim, value_dim, n_actions, hidden_dim).to(device)
+        self.target_network = DuelingQNetwork(key_dim, value_dim, n_actions, hidden_dim).to(device)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=learning_rate)
-        self.replay_buffer = ReplayBuffer(capacity=10000)
+        self.replay_buffer = ReplayBuffer(10000)
         self.timestep = 0
         self.epsilon = 1.0
         self.device = device
         self.learning_rate = learning_rate
+
+        self.key_transform = nn.Sequential(
+            nn.Linear(4, key_dim),
+            nn.ReLU(),
+            nn.Linear(key_dim, key_dim)
+        ).to(device)
+        self.value_transform = nn.Sequential(
+            nn.Linear(4, value_dim),
+            nn.ReLU(),
+            nn.Linear(value_dim, value_dim)
+        ).to(device)
+
 
     def act(self, obs, epsilon):
         # Epsilon-greedy policy
@@ -126,7 +167,9 @@ class DQNAgent:
         else:
             with torch.no_grad():
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                q_values = self.q_network(obs_tensor)
+                key_vectors = self.key_transform(obs_tensor).to(self.device)
+                value_vectors = self.value_transform(obs_tensor).to(self.device)
+                q_values = self.q_network(key_vectors, value_vectors)
                 action = q_values.argmax().item()
 
         return action
@@ -168,67 +211,6 @@ class DQNAgent:
         self.timestep += 1
         self.epsilon = max(0.1, 1.0 - 0.9 * (self.timestep / 10000))
 
-class DQN(nn.Module):
-    def __init__(self, obs_dim, n_actions, hidden_dim=128):
-        super(DQN, self).__init__()
-
-        self.fc1 = nn.Linear(obs_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, n_actions)
-
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
-        self.loss_fn = nn.MSELoss()
-
-    def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = F.relu(self.fc2(x))
-        q_values = self.fc3(x)
-        return q_values
-
-class DuelingQNetwork(nn.Module):
-    def __init__(self, obs_dim, n_actions, hidden_dim=128):
-        super(DuelingQNetwork, self).__init__()
-
-        self.obs_dim = obs_dim
-        self.n_actions = n_actions
-        self.hidden_dim = hidden_dim
-
-        # Define the Q-network architecture (e.g. using a hybrid transformer-RNN)
-        self.transformer_rnn = TransformerRNN(obs_dim, hidden_dim=hidden_dim, num_heads=2, num_layers=2)
-        self.fc_adv = nn.Linear(hidden_dim, n_actions)
-        self.fc_val = nn.Linear(hidden_dim, 1)
-
-        # Define the optimizer and loss function
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
-        self.loss_fn = nn.MSELoss()
-
-    def forward(self, obs, action=None):
-        # Compute the Q-values for the given state-action pair
-        key_vectors, value_vectors = self.transformer_rnn(obs)
-        adv = F.relu(self.fc_adv(value_vectors))
-        val = self.fc_val(value_vectors)
-        q_values = val + adv - adv.mean(dim=1, keepdim=True)
-
-        if action is not None:
-            q_values = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
-        return q_values
-
-class VectorHologram:
-    def __init__(self, dim):
-        self.dim = dim
-        self.data = np.zeros((dim,), dtype=np.complex128)
-
-    def add(self, vector):
-        assert len(vector) == self.dim
-        self.data += np.fft.fft(vector)
-
-    def dot(self, vector):
-        assert len(vector) == self.dim
-        result = np.fft.ifft(self.data * np.fft.fft(vector))
-        return np.real(result)
-
-
-
 class ReplayBuffer:
     def __init__(self, capacity):
         self.capacity = capacity
@@ -259,7 +241,7 @@ agent = DQNAgent(key_dim, value_dim, n_actions, hidden_dim, learning_rate, devic
 transformer_rnn = TransformerRNN(obs_dim, hidden_dim, hidden_dim, 1).to(device)
 
 # Evaluate the learned policy for 100 episodes
-num_episodes = 100
+num_episodes = 10000
 total_reward = 0
 
 for episode in range(num_episodes):
@@ -269,11 +251,12 @@ for episode in range(num_episodes):
     while not done:
         # Take the action with the highest Q-value
         with torch.no_grad():
-            obs_tensor = torch.from_numpy(np.copy(obs)).unsqueeze(0).to(device)
-            key_vectors, value_vectors = transformer_rnn(obs_tensor)
-            print(key_vectors, value_vectors)
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
+            key_vectors = agent.key_transform(obs_tensor).to(device)
+            value_vectors = agent.value_transform(obs_tensor).to(device)
             q_values = agent.q_network(key_vectors, value_vectors)
             action = q_values.argmax().item()
+
 
         # Step the environment and accumulate the reward
         obs, reward, done, _, _ = env.step(action)
