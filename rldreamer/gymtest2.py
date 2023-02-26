@@ -6,36 +6,13 @@ import random
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-# Define the observation function
-class TransformerRNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_heads, num_layers, dropout_prob=0.2):
-        super(TransformerRNN, self).__init__()
-        
-        self.self_attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout_prob)
-        self.dropout = nn.Dropout(p=dropout_prob)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.ffn = nn.Sequential(nn.Linear(hidden_dim, hidden_dim * 4), nn.ReLU(), nn.Linear(hidden_dim * 4, hidden_dim))
-        self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True)
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-        
-    def forward(self, obs):
-        if obs.ndim == 2:
-            # If the input tensor has only two dimensions, add a batch dimension
-            obs = obs.unsqueeze(0)
+losses_list = []
+q_values_list = []
+target_q_values_list = []
 
-        # Compute the GRU embeddings of the input sequence
-        gru_embeddings, hidden = self.gru(obs.view(obs.shape[0], obs.shape[1], -1))
 
-        # Compute the self-attention vectors by passing the GRU embeddings through the self-attention layer
-        key_vectors, _ = self.self_attn(gru_embeddings, gru_embeddings, gru_embeddings)
-
-        # Pass the key vectors through a feedforward network to obtain the value vectors
-        value_vectors = self.ffn(key_vectors)
-
-        return key_vectors, value_vectors
 
 
 
@@ -48,6 +25,8 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
         done = False
         total_reward = 0
         epsilon = epsilon_end + (epsilon_start - epsilon_end) * math.exp(-1.0 * i / epsilon_decay)
+        #epsilon = epsilon_start
+        timestep = 0
 
         for t in range(max_timesteps):
             # Select an action using an epsilon-greedy policy
@@ -55,6 +34,7 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
 
             # Take a step in the environment
             next_obs, reward, done, _, info = env.step(action)
+            reward = reward - (reward * timestep / max_timesteps)
 
             # Add the experience to the replay buffer
             agent.replay_buffer.add(obs, action, reward, next_obs, done)
@@ -66,6 +46,7 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
             # Update the observation and total reward
             obs = next_obs
             total_reward += reward
+            timestep += 1
 
             if done:
                 break
@@ -74,57 +55,31 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
         epsilons.append(epsilon)
 
         # Print the episode number, reward, and epsilon
-        print(f"Episode {i}/{n_episodes}: reward = {total_reward}, epsilon = {epsilon:.2f}")
+        print(f"Episode {i}/{n_episodes}: reward = {total_reward}, epsilon = {epsilon:.2f}, timestep = {timestep}")
 
     return rewards, epsilons
 
-class DQN(nn.Module):
-    def __init__(self, obs_dim, n_actions, hidden_dim=128):
-        super(DQN, self).__init__()
-
-        self.fc1 = nn.Linear(obs_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, n_actions)
-
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
-        self.loss_fn = nn.MSELoss()
-
-    def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = F.relu(self.fc2(x))
-        q_values = self.fc3(x)
-        return q_values
-
     
-class DuelingQNetwork(nn.Module):
-    def __init__(self, num_inputs, num_actions, key_dim, value_dim, hidden_dim):
-        super(DuelingQNetwork, self).__init__()
-
-        self.fc1 = nn.Linear(num_inputs, hidden_dim)
-        self.fc_key = nn.Linear(hidden_dim, key_dim)
-        self.fc_val = nn.Linear(hidden_dim, value_dim)
-        self.fc_adv = nn.Linear(hidden_dim, num_actions)
+class QNetwork(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_actions=2):
+        super(QNetwork, self).__init__()
+        self.fc1 = nn.Linear(4, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 2)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
-        key = F.relu(self.fc_key(x))
-        val = F.relu(self.fc_val(x))
-        adv = F.relu(self.fc_adv(x))
-
-        val = val.view(val.size(0), 1)
-        adv = adv.view(adv.size(0), -1)
-
-        q_values = val + adv - adv.mean(1, keepdim=True)
-        return q_values
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        #print(x)
+        return x
 
 
 
-
-    
 class DQNAgent:
-    def __init__(self, obs_dim, key_dim, value_dim, n_actions, hidden_dim, learning_rate, device):
-        self.q_network = DuelingQNetwork(obs_dim, n_actions, key_dim, value_dim, hidden_dim).to(device)
-        self.target_network = DuelingQNetwork(obs_dim, n_actions, key_dim, value_dim, hidden_dim).to(device)
+    def __init__(self, obs_dim, n_actions, hidden_dim, learning_rate, device):
+        self.q_network = QNetwork(obs_dim, hidden_dim).to(device)
+        self.target_network = QNetwork(obs_dim,hidden_dim).to(device)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=learning_rate)
         self.replay_buffer = ReplayBuffer(10000)
@@ -133,18 +88,7 @@ class DQNAgent:
         self.device = device
         self.learning_rate = learning_rate
         self.n_actions = n_actions
-        self.target_network_update_freq = 1000
-
-        self.key_transform = nn.Sequential(
-            nn.Linear(4, key_dim),
-            nn.ReLU(),
-            nn.Linear(key_dim, key_dim)
-        ).to(device)
-        self.value_transform = nn.Sequential(
-            nn.Linear(4, value_dim),
-            nn.ReLU(),
-            nn.Linear(value_dim, value_dim)
-        ).to(device)
+        self.target_network_update_freq = 10
 
 
     def act(self, obs, epsilon):
@@ -154,40 +98,35 @@ class DQNAgent:
         else:
             with torch.no_grad():
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                key_vectors = self.key_transform(obs_tensor).to(self.device)
-                value_vectors = self.value_transform(obs_tensor).to(self.device)
                 q_values = self.q_network(obs_tensor)
                 action = q_values.argmax().item()
+                #print('obs: ', obs_tensor, 'qs: ', q_values, 'action: ', action)
 
         return action
 
     def update(self, batch_size, gamma):
         # Sample a batch of experiences from the replay buffer
-        obs_key_batch, obs_value_batch, action_batch, reward_batch, next_obs_key_batch, next_obs_value_batch, done_batch = self.replay_buffer.sample(batch_size)
-        obs_key_batch = torch.FloatTensor(obs_key_batch).to(self.device)
-        obs_value_batch = torch.FloatTensor(obs_value_batch).to(self.device)
+        obs_batch, action_batch, reward_batch, next_obs_batch, done_batch = self.replay_buffer.sample(batch_size)
+        obs_batch = torch.FloatTensor(np.array(obs_batch)).to(self.device)
         action_batch = torch.LongTensor(action_batch).to(self.device)
         reward_batch = torch.FloatTensor(reward_batch).to(self.device)
-        next_obs_key_batch = torch.FloatTensor(next_obs_key_batch).to(self.device)
-        next_obs_value_batch = torch.FloatTensor(next_obs_value_batch).to(self.device)
+        next_obs_batch = torch.FloatTensor(np.array(next_obs_batch)).to(self.device)
         done_batch = torch.FloatTensor(done_batch).to(self.device)
 
-        # Compute the Q-values for the current and next observation batches
-        obs_combined = torch.cat((obs_key_batch, obs_value_batch), dim=-1).to(self.device)
-
-        q_values = self.q_network(obs_combined)
-        #q_values = q_values.gather(1, action_batch.unsqueeze(1))
-
-        next_obs_combined = torch.cat((next_obs_key_batch, next_obs_value_batch), dim=-1).to(self.device)
-        next_q_values = self.target_network(next_obs_combined)
+        q_values = self.q_network(obs_batch)
+        next_q_values = self.target_network(next_obs_batch)
         # Compute the target Q-values using the Bellman equation
-        target_q_values = reward_batch + (1 - done_batch) * gamma * next_q_values.max(dim=0)[0]
+        target_q_values = reward_batch + (1 - done_batch) * gamma * next_q_values.max(dim=1)[0]
         # Gather the Q-values for the actions that were taken
-        q_values_for_actions = q_values.gather(0, action_batch.unsqueeze(1).long())
+        q_values_for_actions = torch.gather(q_values, 0, action_batch.unsqueeze(1))
+        #print(q_values_for_actions, '--', target_q_values)
 
 
         # Compute the loss using the smooth L1 loss function
         loss = F.smooth_l1_loss(q_values_for_actions, target_q_values.unsqueeze(1))
+        losses_list.append(loss)
+        q_values_list.append(q_values_for_actions)
+        target_q_values_list.append(target_q_values)
 
 
         # Zero out the gradients and backpropagate the loss
@@ -215,11 +154,7 @@ class ReplayBuffer:
         self.size = 0
 
     def add(self, obs, action, reward, next_obs, done):
-        obs_key = obs[0]  # extract key from observation
-        obs_value = obs[1]  # extract value from observation
-        next_obs_key = next_obs[0]  # extract key from next observation
-        next_obs_value = next_obs[1]  # extract value from next observation
-        experience = (obs_key, obs_value, action, reward, next_obs_key, next_obs_value, done)
+        experience = (obs, action, reward, next_obs, done)
         if len(self.buffer) < self.capacity:
             self.buffer.append(experience)
         else:
@@ -231,29 +166,37 @@ class ReplayBuffer:
             self.buffer.pop(0)
 
     def sample(self, batch_size):
-        obs_key_batch, obs_value_batch, action_batch, reward_batch, next_obs_key_batch, next_obs_value_batch, done_batch = zip(*random.sample(self.buffer, batch_size))
-        return obs_key_batch, obs_value_batch, action_batch, reward_batch, next_obs_key_batch, next_obs_value_batch, done_batch
+        obs_batch, action_batch, reward_batch, next_obs_batch, done_batch = zip(*random.sample(self.buffer, batch_size))
+        return obs_batch,action_batch, reward_batch,next_obs_batch,done_batch
 
 # Initialize the environment and the agent
 env = gym.make('CartPole-v1')
 obs_dim = env.observation_space.shape[0]
 n_actions = env.action_space.n
-key_dim = 4
-value_dim = 1
-hidden_dim = 128
-learning_rate = 1e-3
+hidden_dim = 16
+learning_rate = 1e-4
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu')
-agent = DQNAgent(obs_dim, key_dim, value_dim, n_actions, hidden_dim, learning_rate, device)
-transformer_rnn = TransformerRNN(obs_dim, hidden_dim, hidden_dim, 1).to(device)
+#device = torch.device('cpu')
+agent = DQNAgent(obs_dim, n_actions, hidden_dim, learning_rate, device)
 
 # Evaluate the learned policy for 100 episodes
-num_episodes = 10000
+num_episodes = 2000
 total_reward = 0
 
-train(env, agent, num_episodes, 200, 2, 0.99, 1, 0.1, 1000)
+rewards, epsilons = train(env, agent, num_episodes, 200, 8, 0.99, 0.99, 0.01, 10000)
 env.close()
 
+def plot_learning_curve(rewards, epsilons):
+    plt.plot(rewards)
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.twinx()
+    plt.plot(epsilons, color='r')
+    plt.ylabel('Epsilon')
+    plt.show()
+
+
+plot_learning_curve(rewards, epsilons)
 """ for episode in range(num_episodes):
     obs = env.reset()[0]
     done = False
