@@ -3,18 +3,13 @@ import numpy as np
 import torch
 import math
 import random
-from torch import nn
-from torch import optim
+from torch import Tensor, nn
 import torch.nn.functional as F
+import torch.nn.init as init
 import matplotlib.pyplot as plt
 
 losses_list = []
 q_values_list = []
-target_q_values_list = []
-
-
-
-
 
 # Train the network
 def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_start, epsilon_end, epsilon_decay):
@@ -27,6 +22,7 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
         epsilon = epsilon_end + (epsilon_start - epsilon_end) * math.exp(-1.0 * i / epsilon_decay)
         #epsilon = epsilon_start
         timestep = 0
+        num_actions = 0
 
         for t in range(max_timesteps):
             # Select an action using an epsilon-greedy policy
@@ -34,10 +30,11 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
 
             # Take a step in the environment
             next_obs, reward, done, _, info = env.step(action)
-            reward = reward - (reward * timestep / max_timesteps)
 
             # Add the experience to the replay buffer
             agent.replay_buffer.add(obs, action, reward, next_obs, done)
+
+            reward = reward * (1 + timestep / max_timesteps)
 
             # Update the Q-network using the replay buffer
             if agent.replay_buffer.size > batch_size:
@@ -47,6 +44,7 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
             obs = next_obs
             total_reward += reward
             timestep += 1
+            num_actions += 1
 
             if done:
                 break
@@ -55,41 +53,51 @@ def train(env, agent, n_episodes, max_timesteps, batch_size, gamma, epsilon_star
         epsilons.append(epsilon)
 
         # Print the episode number, reward, and epsilon
-        print(f"Episode {i}/{n_episodes}: reward = {total_reward}, epsilon = {epsilon:.2f}, timestep = {timestep}")
+        print(f"Episode {i}/{n_episodes}: reward = {total_reward}, epsilon = {epsilon:.2f}, 'buffer: , {agent.replay_buffer.size}")
 
     return rewards, epsilons
 
     
 class QNetwork(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_actions=2):
+    def __init__(self, obs_dim, hidden_dim, n_actions=2):
         super(QNetwork, self).__init__()
-        self.fc1 = nn.Linear(4, hidden_dim)
+        self.fc1 = nn.Linear(obs_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 2)
+        self.fc3 = nn.Linear(hidden_dim, n_actions)
+
+        init.uniform_(self.fc1.weight, -1.0 / math.sqrt(obs_dim), 1.0 / math.sqrt(obs_dim))
+        init.uniform_(self.fc2.weight, -1.0 / math.sqrt(hidden_dim), 1.0 / math.sqrt(hidden_dim))
+        init.uniform_(self.fc3.weight, 3e-3, 3e-3)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
-        #print(x)
         return x
-
-
+    
+    def reset_parameters(self):
+        for layer in self.children():
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
 
 class DQNAgent:
     def __init__(self, obs_dim, n_actions, hidden_dim, learning_rate, device):
-        self.q_network = QNetwork(obs_dim, hidden_dim).to(device)
-        self.target_network = QNetwork(obs_dim,hidden_dim).to(device)
+        self.q_network = QNetwork(obs_dim, hidden_dim, n_actions).to(device)
+        self.target_network = QNetwork(obs_dim,hidden_dim, n_actions).to(device)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=learning_rate)
-        self.replay_buffer = ReplayBuffer(10000)
+        self.replay_buffer = ReplayBuffer(50000)
         self.timestep = 0
         self.epsilon = 1.0
         self.device = device
         self.learning_rate = learning_rate
         self.n_actions = n_actions
-        self.target_network_update_freq = 10
+        self.target_network_update_freq = 1000
 
+    def reset(self):
+        #self.replay_buffer.clear()
+        self.q_network.reset_parameters()
+        self.target_network.load_state_dict(self.q_network.state_dict())
 
     def act(self, obs, epsilon):
         # Epsilon-greedy policy
@@ -100,7 +108,7 @@ class DQNAgent:
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
                 q_values = self.q_network(obs_tensor)
                 action = q_values.argmax().item()
-                #print('obs: ', obs_tensor, 'qs: ', q_values, 'action: ', action)
+                #print(obs_tensor, '--', q_values, '--', action)
 
         return action
 
@@ -121,13 +129,10 @@ class DQNAgent:
         q_values_for_actions = torch.gather(q_values, 0, action_batch.unsqueeze(1))
         #print(q_values_for_actions, '--', target_q_values)
 
-
         # Compute the loss using the smooth L1 loss function
         loss = F.smooth_l1_loss(q_values_for_actions, target_q_values.unsqueeze(1))
         losses_list.append(loss)
         q_values_list.append(q_values_for_actions)
-        target_q_values_list.append(target_q_values)
-
 
         # Zero out the gradients and backpropagate the loss
         self.optimizer.zero_grad()
@@ -168,22 +173,27 @@ class ReplayBuffer:
     def sample(self, batch_size):
         obs_batch, action_batch, reward_batch, next_obs_batch, done_batch = zip(*random.sample(self.buffer, batch_size))
         return obs_batch,action_batch, reward_batch,next_obs_batch,done_batch
+    
+    def clear(self):
+        self.buffer = []
+        self.idx = 0
+        self.size = 0
 
 # Initialize the environment and the agent
 env = gym.make('CartPole-v1')
 obs_dim = env.observation_space.shape[0]
 n_actions = env.action_space.n
-hidden_dim = 16
-learning_rate = 1e-4
+hidden_dim = 128
+learning_rate = 5e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 #device = torch.device('cpu')
 agent = DQNAgent(obs_dim, n_actions, hidden_dim, learning_rate, device)
 
 # Evaluate the learned policy for 100 episodes
-num_episodes = 2000
+num_episodes = 2500
 total_reward = 0
 
-rewards, epsilons = train(env, agent, num_episodes, 200, 8, 0.99, 0.99, 0.01, 10000)
+rewards, epsilons = train(env, agent, num_episodes, 200, 32, 0.95, 0.99, 0.001, 1500)
 env.close()
 
 def plot_learning_curve(rewards, epsilons):
@@ -195,29 +205,18 @@ def plot_learning_curve(rewards, epsilons):
     plt.ylabel('Epsilon')
     plt.show()
 
+# Plot the Q-values for each action over time
+def plot_q_values(q_values_list):
+    num_actions = q_values_list[0].shape[1]
+    for action in range(num_actions):
+        action_q_values = [Tensor.cpu(q_values[action].detach()).numpy() for q_values in q_values_list]
+        plt.plot(action_q_values, label=f"Action {action}")
+    plt.xlabel("Training episode")
+    plt.ylabel("Q-value")
+    plt.legend()
+    plt.show()
+
+
 
 plot_learning_curve(rewards, epsilons)
-""" for episode in range(num_episodes):
-    obs = env.reset()[0]
-    done = False
-
-    while not done:
-        # Take the action with the highest Q-value
-        with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-            key_vectors = agent.key_transform(obs_tensor).to(device)
-            value_vectors = agent.value_transform(obs_tensor).to(device)
-            q_values = agent.q_network(key_vectors, value_vectors)
-            action = q_values.argmax().item()
-
-
-        # Step the environment and accumulate the reward
-        obs, reward, done, _, _ = env.step(action)
-        total_reward += reward
-
-    # Print the total reward for the episode
-    print(f"Episode {episode}, total reward = {total_reward}, epsilon = {agent.epsilon:.2f}, reward = {reward}")
-    total_reward = 0
-
-# Close the environment
-env.close() """
+plot_q_values(q_values_list)
