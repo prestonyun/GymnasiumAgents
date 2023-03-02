@@ -193,7 +193,7 @@ class PrioritizedDQNAgent:
             state, _ = env.reset()
             total_reward = 0
             for step in range(max_steps):
-                #env.render()
+                env.render()
                 action = self.act(state, epsilon)
                 next_state, reward, done, _, info = env.step(action)
                 total_reward += reward
@@ -258,7 +258,7 @@ def main():
     Returns:
         None
     """
-    env = gym.make("CartPole-v1")
+    env = gym.make("CartPole-v1", render_mode="human")
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
