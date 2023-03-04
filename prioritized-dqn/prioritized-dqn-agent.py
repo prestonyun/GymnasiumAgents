@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 from torch import Tensor
-
+from accelerate import Accelerator
 
 class PrioritizedDQNAgent:
     """
@@ -54,7 +54,9 @@ class PrioritizedDQNAgent:
             Computes an action for a given state using the Q-network and an epsilon-greedy exploration strategy.
     """
     def __init__(self, state_size, action_size, hidden_size, lr, gamma, capacity, batch_size, alpha, beta_start, beta_annealing_steps):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        accelerator = Accelerator()
+        self.device = accelerator.device
         self.q_net = nn.Sequential(
             nn.Linear(state_size, hidden_size),
             nn.ReLU(),
@@ -165,7 +167,10 @@ class PrioritizedDQNAgent:
         # Compute the loss and update the network weights
         loss = (weights * self.loss_fn(q_values, expected_q_values)).mean()
         self.optimizer.zero_grad()
-        loss.backward()
+
+        # loss.backward()
+        self.accelerator.backward(loss)
+
         self.optimizer.step()
         # Update the beta value and the number of steps
         self.beta = beta
