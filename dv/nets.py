@@ -48,7 +48,7 @@ class EnsembleRSSM(nn.Module):
         if state is None:
             state = self.initial(torch.tensor(action.shape[0]))
             
-        post, prior = common.static_scan(
+        post, prior = static_scan(
             lambda prev, inputs: self.obs_step(prev[0], *inputs),
             (swap(action), swap(embed), swap(is_first)), (state, state))
         
@@ -68,7 +68,7 @@ class EnsembleRSSM(nn.Module):
         assert isinstance(state, dict), state
         
         action = swap(action)
-        prior = self.static_scan(self.img_step, action, state)
+        prior = static_scan(self.img_step, action, state)
         prior = {k: swap(v) for k, v in prior.items()}
         
         return prior
@@ -210,23 +210,56 @@ class EnsembleRSSM(nn.Module):
         return loss, value
     
 class Encoder(torch.nn.Module):
+    """
+    A module that encodes input data using convolutional and/or fully connected layers.
 
-  def __init__(
-      self, shapes, cnn_keys=r'.*', mlp_keys=r'.*', act='elu', norm='none',
-      cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400]):
-    super(Encoder, self).__init__()
-    self.shapes = shapes
-    self.cnn_keys = [
-        k for k, v in shapes.items() if re.match(cnn_keys, k) and len(v) == 3]
-    self.mlp_keys = [
-        k for k, v in shapes.items() if re.match(mlp_keys, k) and len(v) == 1]
-    print('Encoder CNN inputs:', list(self.cnn_keys))
-    print('Encoder MLP inputs:', list(self.mlp_keys))
-    self._act = get_act(act)
-    self._norm = norm
-    self._cnn_depth = cnn_depth
-    self._cnn_kernels = cnn_kernels
-    self._mlp_layers = mlp_layers
+    Args:
+        shapes (dict): A dictionary with input shapes.
+        cnn_keys (str, optional): A regular expression that matches the keys of input shapes
+            that will be processed by convolutional layers. Defaults to '.*'.
+        mlp_keys (str, optional): A regular expression that matches the keys of input shapes
+            that will be processed by fully connected layers. Defaults to '.*'.
+        act (str, optional): The activation function to use. Defaults to 'elu'.
+        norm (str, optional): The normalization method to use. Defaults to 'none'.
+        cnn_depth (int, optional): The number of convolutional filters to use. Defaults to 48.
+        cnn_kernels (tuple[int], optional): The kernel sizes for each convolutional layer.
+            Defaults to (4, 4, 4, 4).
+        mlp_layers (list[int], optional): The number of units for each fully connected layer.
+            Defaults to [400, 400, 400, 400].
+    """
+    def __init__(
+        self, shapes, cnn_keys=r'.*', mlp_keys=r'.*', act='elu', norm='none',
+        cnn_depth=48, cnn_kernels=(4, 4, 4, 4), mlp_layers=[400, 400, 400, 400]):
+        """
+        Initializes the Encoder module.
+
+        Args:
+            shapes (dict): A dictionary with input shapes.
+            cnn_keys (str, optional): A regular expression that matches the keys of input shapes
+                that will be processed by convolutional layers. Defaults to '.*'.
+            mlp_keys (str, optional): A regular expression that matches the keys of input shapes
+                that will be processed by fully connected layers. Defaults to '.*'.
+            act (str, optional): The activation function to use. Defaults to 'elu'.
+            norm (str, optional): The normalization method to use. Defaults to 'none'.
+            cnn_depth (int, optional): The number of convolutional filters to use. Defaults to 48.
+            cnn_kernels (tuple[int], optional): The kernel sizes for each convolutional layer.
+                Defaults to (4, 4, 4, 4).
+            mlp_layers (list[int], optional): The number of units for each fully connected layer.
+                Defaults to [400, 400, 400, 400].
+        """
+        super(Encoder, self).__init__()
+        self.shapes = shapes
+        self.cnn_keys = [
+            k for k, v in shapes.items() if re.match(cnn_keys, k) and len(v) == 3]
+        self.mlp_keys = [
+            k for k, v in shapes.items() if re.match(mlp_keys, k) and len(v) == 1]
+        print('Encoder CNN inputs:', list(self.cnn_keys))
+        print('Encoder MLP inputs:', list(self.mlp_keys))
+        self._act = get_act(act)
+        self._norm = norm
+        self._cnn_depth = cnn_depth
+        self._cnn_kernels = cnn_kernels
+        self._mlp_layers = mlp_layers
 
     @torch.jit.script
     def forward(self, data):
@@ -395,3 +428,18 @@ def get_act(name):
         return getattr(F, name)
     else:
         raise NotImplementedError(name)
+    
+def static_scan(fn, inputs, start, reverse=False):
+    last = start
+    outputs = [[] for _ in torch.flatten(start)]
+    indices = range(torch.flatten(inputs)[0].shape[0])
+    if reverse:
+        indices = reversed(indices)
+    for index in indices:
+        inp = torch.nest.map_structure(lambda x: x[index], inputs)
+        last = fn(last, inp)
+        [o.append(l) for o, l in zip(outputs, torch.flatten(last))]
+    if reverse:
+        outputs = [list(reversed(x)) for x in outputs]
+    outputs = [torch.stack(x, 0) for x in outputs]
+    return torch.nest.pack_sequence_as(start, outputs)
