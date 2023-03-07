@@ -48,7 +48,6 @@ markdown-it-py==2.2.0
 MarkupSafe==2.1.2
 matplotlib==3.7.0
 mdurl==0.1.2
-MouseInfo==0.1.3
 mujoco==2.3.2
 multidict==6.0.4
 numpy==1.24.2
@@ -56,7 +55,6 @@ ordered-set==4.1.0
 packaging==23.0
 Pillow==9.4.0
 psutil==5.9.4
-PyAutoGUI==0.9.53
 pycparser==2.21
 pydantic==1.10.5
 pygame==2.1.3.dev8
@@ -83,7 +81,7 @@ rich==13.3.1
 six==1.16.0
 sniffio==1.3.0
 soupsieve==2.4
-starlette==0.22.0
+starlette==0.25.0
 starsessions==1.3.0
 torch==1.13.1+cu113
 torchaudio==0.10.0+cu113
