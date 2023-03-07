@@ -151,20 +151,22 @@ class Critic(nn.Module):
         act_dim (int): The dimension of action space.
         hidden_dim (int): The dimension of hidden state space.
     """
-    def __init__(self, obs_dim, act_dim, hidden_dim):
+    def __init__(self, obs_dim, act_dim, hidden_dim, num_layers=1):
         super(Critic, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
 
         # Define the critic network
-        self.obs_encoder = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
-            nn.ReLU(),)
-
-        self.fc = nn.Linear(hidden_dim + act_dim, hidden_dim)
-
-        self.value = nn.Linear(hidden_dim, 1)
+        layers = []
+        layers.append(nn.Linear(obs_dim + act_dim, hidden_dim))
+        for i in range(num_layers):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 1))
+        
+        self.critic_network = nn.Sequential(*layers)
 
     def forward(self, obs, action):
         """Feedforward function of the critic.
@@ -177,16 +179,11 @@ class Critic(nn.Module):
             value (torch.Tensor): A tensor of shape (batch_size, 1) representing the state value.
         """
         # Encode the observation and action into a hidden representation
-        obs_h = self.obs_encoder(obs)
         action = torch.unsqueeze(action, dim=-1)
-        x = torch.cat([obs_h, action], dim=-1)
-        x = self.fc(x)
-        x = F.relu(x, inplace=False)
+        x = torch.cat([obs, action], dim=-1)
+        value = self.critic_network(x)
 
-        #pdb.set_trace()
-        # Calculate the state value from the hidden representation
-        v = self.value(x)
-        return v
+        return value
 
 def train(num_episodes, env, rssm, actor, critic, optimizer_actor, optimizer_critic, gamma, device):
     """Train function for the PPO algorithm.
@@ -212,7 +209,7 @@ def train(num_episodes, env, rssm, actor, critic, optimizer_actor, optimizer_cri
         done = False
         episode_rewards = 0
 
-        state = rssm.init_state(1).to(device)
+        state = rssm.initialize_state(1).to(device)
 
         while not done:
             # env.render()
@@ -292,7 +289,7 @@ def main():
 
     rssm = RSSM(obs_dim, act_dim, state_dim, hidden_dim, device).to(device)
     actor = Actor(obs_dim, act_dim, hidden_dim).to(device)
-    critic = Critic(obs_dim, act_dim, hidden_dim).to(device)
+    critic = Critic(obs_dim, act_dim, hidden_dim, 4).to(device)
     for param in actor.parameters():
         param = param.to(device)
     for param in critic.parameters():
