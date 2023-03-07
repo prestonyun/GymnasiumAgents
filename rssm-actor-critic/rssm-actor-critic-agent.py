@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import gymnasium as gym
 import matplotlib.pyplot as plt
-import numpy as np
-
-import pdb
 
 class RSSM(nn.Module):
     """A Recurrent State-Space Model (RSSM) implementation in PyTorch.
@@ -16,12 +13,13 @@ class RSSM(nn.Module):
         state_dim (int): The dimension of latent state space.
         hidden_dim (int): The dimension of hidden state space.
     """
-    def __init__(self, obs_dim, act_dim, state_dim, hidden_dim):
+    def __init__(self, obs_dim, act_dim, state_dim, hidden_dim, device):
         super(RSSM, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.state_dim = state_dim
         self.hidden_dim = hidden_dim
+        self.device = device
 
         # Define the encoder network
         self.encoder = nn.Sequential(
@@ -47,7 +45,18 @@ class RSSM(nn.Module):
         )
 
         # Define the prior state distribution
-        self.prior = torch.distributions.Normal(torch.zeros(state_dim).to('cuda'), torch.ones(state_dim).to('cuda'))
+        self.prior = torch.distributions.Normal(torch.zeros(state_dim).to(self.device), torch.ones(state_dim).to(self.device))
+
+    def initialize_state(self, batch_size):
+        """Sample the initial latent state from the prior distribution.
+
+        Args:
+            batch_size (int): The number of episodes in the batch.
+
+        Returns:
+            state (torch.Tensor): A tensor of shape (batch_size, state_dim) representing the initial latent state.
+        """
+        return self.prior.sample((batch_size,))
 
     def forward(self, obs, action, state):
         """Feedforward function of the RSSM.
@@ -64,23 +73,23 @@ class RSSM(nn.Module):
             likelihood (torch.distributions.Normal): A Normal distribution object representing the likelihood of the observation given the current state.
         """
         # Encode the observation and action into the current state
-        action = torch.unsqueeze(action, dim=-1).to('cuda')
-        x = torch.cat([obs, action], dim=-1).to('cuda')
+        action = torch.unsqueeze(action, dim=-1).to(self.device)
+        x = torch.cat([obs, action], dim=-1).to(self.device)
         h = self.encoder(x)
 
         # Calculate the next state using the current state and action
-        x = torch.cat([h, action], dim=-1).to('cuda')
+        x = torch.cat([h, action], dim=-1).to(self.device)
         next_state = self.transition(x)
 
         # Calculate the observation from the current state
-        y = torch.cat([h, obs, action], dim=-1).to('cuda')
+        y = torch.cat([h, obs, action], dim=-1).to(self.device)
         obs_pred = self.decoder(y)
 
         # Calculate the likelihood of the observation given the current state
         likelihood = torch.distributions.Normal(obs_pred, 0.1)
 
         # Calculate the KL divergence between the prior and current state distribution
-        kl_div = torch.distributions.kl.kl_divergence(torch.distributions.Normal(state.to('cuda'), torch.ones(state.shape).to('cuda')), self.prior)
+        kl_div = torch.distributions.kl.kl_divergence(torch.distributions.Normal(state.to(self.device), torch.ones(state.shape).to(self.device)), self.prior)
 
         # Return the predicted observation, next state, and KL divergence
         return obs_pred, next_state, kl_div, likelihood
@@ -129,7 +138,7 @@ class Actor(nn.Module):
         logits = self.logits(x)
 
         # Apply softmax to the logits to get the probability distribution over the discrete actions
-        action_probs = F.softmax(logits, dim=-1)
+        action_probs = F.log_softmax(logits, dim=-1)
 
         return action_probs
 
@@ -202,11 +211,15 @@ def train(num_episodes, env, rssm, actor, critic, optimizer_actor, optimizer_cri
         obs, _ = env.reset()
         done = False
         episode_rewards = 0
+
+        state = rssm.init_state(1).to(device)
+
         while not done:
-            env.render()
+            # env.render()
             # Sample an action from the Actor network
             obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(device)
             action_probs = actor(obs)
+            action_probs = torch.exp(action_probs)
             action = torch.multinomial(action_probs, 1).item()
 
             # Take a step in the environment with the selected action
@@ -217,8 +230,8 @@ def train(num_episodes, env, rssm, actor, critic, optimizer_actor, optimizer_cri
             action_tensor = torch.tensor(action, dtype=torch.float32).unsqueeze(0).to(device)
             next_obs_tensor = torch.tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device)
 
-            state_tensor = torch.zeros(rssm.state_dim).to(device)
-            obs_pred, next_state, kl_div, likelihood = rssm(obs_tensor, action_tensor, state_tensor)
+            # state_tensor = torch.zeros(rssm.state_dim).to(device)
+            obs_pred, next_state, kl_div, likelihood = rssm(obs_tensor, action_tensor, state)
 
             # Update the Critic network
 
@@ -226,20 +239,22 @@ def train(num_episodes, env, rssm, actor, critic, optimizer_actor, optimizer_cri
 
             # Calculate the TD error
             next_action_probs = actor(next_obs_tensor)
+            next_action_probs = torch.exp(next_action_probs)
             next_action = torch.multinomial(next_action_probs, 1).item()
             next_action_tensor = torch.tensor(next_action, dtype=torch.float32).unsqueeze(0).to(device)
             next_value = critic(next_obs_tensor, next_action_tensor) if not done else 0
             td_error = reward + gamma * next_value - value
 
             # Update the Actor network
-            log_prob = torch.log(action_probs[0, action])
+            action = torch.tensor(action, dtype=torch.int64).unsqueeze(-1).unsqueeze(0).to(device)
+            log_prob = torch.gather(torch.log(action_probs), dim=1, index=action).to(device)
             actor_loss = -(log_prob * td_error.detach()).mean()
 
             # Update the Critic network
             critic_loss = td_error.pow(2).mean()
 
             optimizer_actor.zero_grad()
-            actor_loss.backward(retain_graph=True)
+            actor_loss.backward()
             optimizer_actor.step()
 
             optimizer_critic.zero_grad()
@@ -265,9 +280,9 @@ def main():
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
-    env = gym.make('CartPole-v1', render_mode='human')#, render_mode='human')
+    env = gym.make('CartPole-v1')#, render_mode='human')
 
-    num_episodes = 200
+    num_episodes = 600
     lr = 1e-3
     gamma = 0.99
     obs_dim = env.observation_space.shape[0]
@@ -275,7 +290,7 @@ def main():
     state_dim = 5
     hidden_dim = 128
 
-    rssm = RSSM(obs_dim, act_dim, state_dim, hidden_dim).to(device)
+    rssm = RSSM(obs_dim, act_dim, state_dim, hidden_dim, device).to(device)
     actor = Actor(obs_dim, act_dim, hidden_dim).to(device)
     critic = Critic(obs_dim, act_dim, hidden_dim).to(device)
     for param in actor.parameters():
@@ -308,10 +323,11 @@ def main():
     while not done:
         # Sample a discrete action from the probability distribution output by the Actor network
         action_probs = actor(torch.tensor(obs, dtype=torch.float32).to(device))
+        action_probs = torch.exp(action_probs)
         action = torch.multinomial(action_probs, 1).item()
 
         obs, reward, done, _, info = env.step(action)
-        env.render()
+        # env.render()
 
 if __name__ == '__main__':
     main()
