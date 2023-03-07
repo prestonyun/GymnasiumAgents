@@ -17,6 +17,7 @@ python prioritized-dqn-agent.py
 Currently, the following agents are available:
 * DQN with Prioritized Replay
 * RSSM with Actor-Critic
+
 More agents will be added in the future.
 
 ## Environments
