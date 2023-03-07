@@ -22,3 +22,4 @@ More agents will be added in the future.
 ## Environments
 The agents were tested on the following environments:
 * CartPole-v1
+* LunarLander-v2
