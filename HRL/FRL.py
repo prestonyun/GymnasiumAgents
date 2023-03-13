@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import gymnasium as gym
+import torch.nn.functional as F
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -14,30 +15,37 @@ class HighLevelManager(nn.Module):
         self.fc1 = nn.Linear(obs_shape[0], 64).to(device)
         self.fc2 = nn.Linear(64, 64).to(device)
         self.fc3 = nn.Linear(64, subgoal_shape[0]).to(device)
+        self.temperature = 1.0
 
     def forward(self, obs):
         x = torch.relu(self.fc1(obs))
         x = torch.relu(self.fc2(x))
-        subgoal = torch.tanh(self.fc3(x))
+        logits = self.fc3(x)
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-9) + 1e-9)
+        subgoal = F.gumbel_softmax(logits/self.temperature + gumbel_noise, tau=1.0, dim=-1)
+        subgoal = subgoal * 2 - 1
         return subgoal
 
 # Define the low-level worker
 class LowLevelWorker(nn.Module):
-    def __init__(self, obs_shape, action_shape):
+    def __init__(self, obs_shape, action_shape, noise_std=0.1):
         super(LowLevelWorker, self).__init__()
         self.fc1 = nn.Linear(obs_shape, 64).to(device)
         self.fc2 = nn.Linear(64, 64).to(device)
         self.fc3 = nn.Linear(64, 1).to(device)
+        self.noise_std = noise_std
         
     def forward(self, obs):
         x = torch.relu(self.fc1(obs))
         x = torch.relu(self.fc2(x))
-        action = torch.tanh(self.fc3(x))
+        action_mean = torch.tanh(self.fc3(x))
+        action_noise = torch.randn_like(action_mean) * self.noise_std
+        action = torch.clamp(action_mean + action_noise, -1.0, 1.0)
         return action
 
 # Define the SAC algorithm
 class SAC:
-    def __init__(self, env, subgoal_shape, worker_models, worker_lr=1e-4, critic_lr=1e-3, actor_lr=1e-3, gamma=0.99, alpha=0.2, tau=0.005, replay_buffer_size=int(1e6), batch_size=128):
+    def __init__(self, env, subgoal_shape, worker_models, worker_lr=1e-4, critic_lr=1e-3, actor_lr=1e-3, gamma=0.99, alpha=1.0, alpha_lr=1e-4, min_alpha=0.01, tau=0.005, replay_buffer_size=int(1e6), batch_size=128):
         self.env = env
         self.subgoal_shape = subgoal_shape
         self.worker_models = worker_models
@@ -46,6 +54,8 @@ class SAC:
         self.actor_lr = actor_lr
         self.gamma = gamma
         self.alpha = alpha
+        self.alpha_lr = alpha_lr
+        self.min_alpha = min_alpha
         self.tau = tau
         self.replay_buffer_size = replay_buffer_size
         self.batch_size = batch_size
@@ -142,6 +152,8 @@ class SAC:
         alpha_loss.backward()
         self.high_level_entropy_optimizer.step()
 
+        #self.alpha = max(self.alpha * np.exp(-self.alpha_lr), 0.01)
+
     def update_workers(self):
         # Update the low-level workers
         for i in range(len(self.worker_models)):
@@ -179,30 +191,36 @@ class SAC:
             critic_loss.backward()
             self.worker_critic_optimizer.step()
 
+            #self.alpha = max(self.alpha * np.exp(-self.alpha_lr), 0.01)
+
+    def update_alpha(self, step):
+        self.alpha = max(self.alpha * (1-step / 100000), 0.01)
 
     # Train the SAC algorithm
     def train(self, num_episodes):
         obs, _ = self.env.reset()
         for episode in range(num_episodes):
-            #env.render()
+            env.render()
             subgoal = self.high_level_actor(torch.FloatTensor(obs).to(device)).detach().cpu().numpy()
             done = False
             total_reward = 0
             episode_steps = 0
+            action = np.zeros((len(self.worker_models), 1))
             while not done and episode_steps < self.env._max_episode_steps:
                 # Choose an action from the low-level worker
-                action = np.zeros((len(self.worker_models), 1))
                 for i in range(len(self.worker_models)):
                     action[i] = self.worker_models[i](torch.FloatTensor(obs).to(device)).detach().cpu().numpy()
                 action = action.squeeze()
-
                 # Execute the action and observe the next state and reward
                 next_obs, reward, done, _, _ = self.env.step(action)
-
+                print(subgoal)
                 # Store the transition in the replay buffer
                 self.replay_buffer.append((obs, subgoal, action, reward, next_obs, done))
-                if len(self.replay_buffer) > self.replay_buffer_size:
+                while len(self.replay_buffer) > self.replay_buffer_size:
                     self.replay_buffer.pop(0)
+
+                # Update alpha
+                self.update_alpha(episode)
 
                 # Update the high-level manager and low-level workers
                 if len(self.replay_buffer) > self.batch_size:
@@ -214,17 +232,18 @@ class SAC:
                 total_reward += reward
                 episode_steps += 1
 
-            print("Episode {} - Total reward: {}".format(episode, total_reward))
+            print("Episode {} - Total reward: {}, alpha: {}".format(episode, total_reward, self.alpha))
+            #print(subgoal)
             obs, _ = self.env.reset()
 
 # Test the SAC algorithm
-env = gym.make('BipedalWalker-v3')#, render_mode='human')
+env = gym.make('BipedalWalker-v3', render_mode='human')
 subgoal_shape = (4,)
 worker_models = [LowLevelWorker(env.observation_space.shape[0], env.action_space.shape[0]) for _ in range(subgoal_shape[0])]
 
 sac = SAC(env, subgoal_shape, worker_models)
 
-sac.train(100)
+sac.train(10000)
 torch.save(sac.high_level_actor.state_dict(), 'high_level_actor.pth')
 for i, model in enumerate(sac.worker_models):
     torch.save(model.state_dict(), 'worker_model_{}.pth'.format(i))
