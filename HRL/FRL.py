@@ -26,7 +26,6 @@ class HighLevelManager(nn.Module):
         subgoal = subgoal * 2 - 1
         return subgoal
 
-# Define the low-level worker
 class LowLevelWorker(nn.Module):
     def __init__(self, obs_shape, action_shape, noise_std=0.1):
         super(LowLevelWorker, self).__init__()
@@ -38,14 +37,15 @@ class LowLevelWorker(nn.Module):
     def forward(self, obs):
         x = torch.relu(self.fc1(obs))
         x = torch.relu(self.fc2(x))
-        action_mean = torch.tanh(self.fc3(x))
+        action_mean = torch.sigmoid(self.fc3(x))
         action_noise = torch.randn_like(action_mean) * self.noise_std
-        action = torch.clamp(action_mean + action_noise, -1.0, 1.0)
+        action = torch.clamp(action_mean + action_noise, 0.0, 1.0) * 2.0 - 1.0
         return action
+
 
 # Define the SAC algorithm
 class SAC:
-    def __init__(self, env, subgoal_shape, worker_models, worker_lr=1e-4, critic_lr=1e-3, actor_lr=1e-3, gamma=0.99, alpha=1.0, alpha_lr=1e-4, min_alpha=0.01, tau=0.005, replay_buffer_size=int(1e6), batch_size=128):
+    def __init__(self, env, subgoal_shape, worker_models, worker_lr=1e-4, critic_lr=1e-3, actor_lr=1e-3, gamma=0.99, alpha=0.2, alpha_lr=1e-4, min_alpha=0.01, tau=0.005, replay_buffer_size=int(1e6), batch_size=128):
         self.env = env
         self.subgoal_shape = subgoal_shape
         self.worker_models = worker_models
@@ -76,7 +76,7 @@ class SAC:
         self.worker_target_critic1s = []
         self.worker_target_critic2s = []
         self.worker_entropy_optimizers = []
-        self.worker_critic_optimizer = None
+        self.worker_critic_optimizers = []
         for i in range(len(worker_models)):
             worker_critic1 = nn.Linear(env.observation_space.shape[0] + subgoal_shape[0] + 1, 64)
             worker_critic2 = nn.Linear(64, 1)
@@ -89,6 +89,7 @@ class SAC:
             self.worker_target_critic1s.append(worker_target_critic1.to(device))
             self.worker_target_critic2s.append(worker_target_critic2.to(device))
             self.worker_entropy_optimizers.append(worker_entropy_optimizer)
+            self.worker_critic_optimizers.append(self.worker_critic_optimizer)
 
         # Initialize the replay buffer
         self.replay_buffer = []
@@ -135,7 +136,7 @@ class SAC:
 
         # Compute the actor and critic losses
         actor_loss = -torch.mean(self.alpha * self.high_level_actor(obs_batch) - self.compute_high_level_q(obs_batch, self.high_level_actor(obs_batch)))
-        critic_loss = nn.functional.mse_loss(q_value, target_q_value)
+        critic_loss = F.mse_loss(q_value, target_q_value)
 
         # Update the actor and critic parameters
         self.high_level_actor_optimizer.zero_grad()
@@ -151,8 +152,6 @@ class SAC:
         self.high_level_entropy_optimizer.zero_grad()
         alpha_loss.backward()
         self.high_level_entropy_optimizer.step()
-
-        #self.alpha = max(self.alpha * np.exp(-self.alpha_lr), 0.01)
 
     def update_workers(self):
         # Update the low-level workers
@@ -180,18 +179,17 @@ class SAC:
 
             # Compute the actor and critic losses
             actor_loss = -torch.mean(self.alpha * self.high_level_actor(obs_batch) - self.compute_worker_q(obs_batch, subgoal_batch, self.high_level_actor(obs_batch)[:, i], i))
-            critic_loss = nn.functional.mse_loss(q_value, target_q_value)
+            critic_loss = F.mse_loss(q_value, target_q_value)
 
             # Update the actor and critic parameters
             self.worker_entropy_optimizers[i].zero_grad()
             actor_loss.backward()
             self.worker_entropy_optimizers[i].step()
 
-            self.worker_critic_optimizer.zero_grad()
+            self.worker_critic_optimizers[i].zero_grad()
             critic_loss.backward()
             self.worker_critic_optimizer.step()
 
-            #self.alpha = max(self.alpha * np.exp(-self.alpha_lr), 0.01)
 
     def update_alpha(self, step):
         self.alpha = max(self.alpha * (1-step / 100000), 0.01)
@@ -200,7 +198,7 @@ class SAC:
     def train(self, num_episodes):
         obs, _ = self.env.reset()
         for episode in range(num_episodes):
-            env.render()
+            #env.render()
             subgoal = self.high_level_actor(torch.FloatTensor(obs).to(device)).detach().cpu().numpy()
             done = False
             total_reward = 0
@@ -213,14 +211,10 @@ class SAC:
                 action = action.squeeze()
                 # Execute the action and observe the next state and reward
                 next_obs, reward, done, _, _ = self.env.step(action)
-                print(subgoal)
                 # Store the transition in the replay buffer
                 self.replay_buffer.append((obs, subgoal, action, reward, next_obs, done))
                 while len(self.replay_buffer) > self.replay_buffer_size:
                     self.replay_buffer.pop(0)
-
-                # Update alpha
-                self.update_alpha(episode)
 
                 # Update the high-level manager and low-level workers
                 if len(self.replay_buffer) > self.batch_size:
@@ -237,13 +231,13 @@ class SAC:
             obs, _ = self.env.reset()
 
 # Test the SAC algorithm
-env = gym.make('BipedalWalker-v3', render_mode='human')
+env = gym.make('BipedalWalker-v3')#, render_mode='human')
 subgoal_shape = (4,)
 worker_models = [LowLevelWorker(env.observation_space.shape[0], env.action_space.shape[0]) for _ in range(subgoal_shape[0])]
 
 sac = SAC(env, subgoal_shape, worker_models)
 
-sac.train(10000)
+sac.train(100)
 torch.save(sac.high_level_actor.state_dict(), 'high_level_actor.pth')
 for i, model in enumerate(sac.worker_models):
     torch.save(model.state_dict(), 'worker_model_{}.pth'.format(i))
