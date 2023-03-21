@@ -17,11 +17,17 @@ class MuZeroNetwork(nn.Module):
             nn.ReLU()
         )
         
-        self.dynamics = nn.Sequential(
+        self.dynamics_state = nn.Sequential(
             nn.Linear(64 + 1, 64),
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU()
+        )
+
+        self.dynamics_reward = nn.Sequential(
+            nn.Linear(64 + 1, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
         )
         
         self.prediction = nn.Sequential(
@@ -36,7 +42,9 @@ class MuZeroNetwork(nn.Module):
     def next_states(self, state, action):
         if len(action.shape) == 1:
             action = action.unsqueeze(0)
-        return self.dynamics(torch.cat([state, action], dim=1))
+        next_state = self.dynamics_state(torch.cat([state, action], dim=1))
+        reward = self.dynamics_reward(torch.cat([state, action], dim=1))
+        return next_state, reward
 
     def policy_value(self, state):
         return self.prediction(state)
@@ -65,7 +73,12 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs):
     agent = MuZeroAgent(env, network, device)
     
     optimizer = optim.Adam(network.parameters(), lr=learning_rate)
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5)
     replay_buffer = deque(maxlen=replay_buffer_size)
+
+    best_eval_reward = float('-inf')
+    early_stopping_patience = 20
+    early_stopping_counter = 0
 
     for epoch in range(epochs):
         # Generate data using MCTS and store it in the replay buffer
@@ -100,7 +113,9 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs):
 
                 # Compute target value
                 with torch.no_grad():
-                    target_value = reward + agent.network.policy_value(agent.network.next_states(agent.network.initial_states(state), action)).max().unsqueeze(0)
+                    next_state, _ = agent.network.next_states(agent.network.initial_states(state), action)
+                    target_value = reward + agent.network.policy_value(next_state).max().unsqueeze(0)
+
 
                 # Compute predicted value
                 predicted_value = agent.network.policy_value(agent.network.initial_states(state)).gather(1, action.unsqueeze(1))
@@ -111,11 +126,39 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs):
             loss.backward()
             optimizer.step()
 
+            eval_reward = evaluate_agent(agent, env_name, num_episodes=5)
+            print(f"Epoch {epoch}: Evalu reward = {eval_reward}")
+
+            if eval_reward > best_eval_reward:
+                best_eval_reward = eval_reward
+                torch.save(network.state_dict(), "best_muzero_model.pt")
+                early_stopping_counter = 0
+            else:
+                early_stopping_counter += 1
+                if early_stopping_counter >= early_stopping_patience:
+                    print("Early stopping")
+                    break
+            
+            lr_scheduler.step(eval_reward)
             # Logging
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}: Loss = {loss.item()}")
 
     return agent
+
+def evaluate_agent(agent, env_name, num_episodes):
+    env = gym.vector.make(env_name, num_episodes)
+    total_rewards = np.zeros(num_episodes)
+    states, _ = env.reset()
+    dones = np.array([False] * num_episodes)
+
+    while not np.all(dones):
+        actions = agent.act(states, temperature=0.001)
+        states, rewards, new_dones, _, _ = env.step(actions)
+        total_rewards += rewards * ~dones
+        dones = np.logical_or(dones, new_dones)
+
+    return total_rewards.mean()
 
 def test_agent(agent, env_name, episodes):
     env = gym.make(env_name, render_mode="human")
