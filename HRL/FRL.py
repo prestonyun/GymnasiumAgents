@@ -314,9 +314,9 @@ class SAC:
             #print(subgoal)
             obs, _ = self.env.reset()
 
-        torch.save(self.high_level_actor.state_dict(), 'high_level_actor.pth')
-        for i, model in enumerate(self.worker_models):
-            torch.save(model.state_dict(), 'worker_model_{}.pth'.format(i)) 
+            torch.save(self.high_level_actor.state_dict(), 'high_level_actor.pth')
+            for i, model in enumerate(self.worker_models):
+                torch.save(model.state_dict(), 'worker_model_{}.pth'.format(i)) 
 
 # Test the SAC algorithm
 env = gym.make('BipedalWalker-v3')#, render_mode='human')
@@ -325,4 +325,4 @@ worker_models = [LowLevelWorker(env.observation_space.shape[0], env.action_space
 
 sac = SAC(env, subgoal_shape, worker_models)
 
-sac.train(1000)
+sac.train(5000)
