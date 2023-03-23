@@ -15,7 +15,7 @@ class MuZeroNetwork(nn.Module):
         self.representation = nn.Sequential(
             nn.Linear(np.prod(input_shape), 64),
             nn.ReLU(),
-            nn.Linear(64, 8),
+            nn.Linear(64, 64),
             nn.ReLU()
         )
         
@@ -33,47 +33,41 @@ class MuZeroNetwork(nn.Module):
         )
         
         self.prediction = nn.Sequential(
-            nn.Linear(8, 64),
+            nn.Linear(64, 64),
             nn.ReLU(),
             nn.Linear(64, action_space_size)
         )
 
-    def initial_states(self, x):
+    def initial_state(self, x):
         return self.representation(x)
 
-    def next_states(self, state, action):
-        if len(action.shape) == 1:
-            action = action.unsqueeze(0)
-        next_state = self.dynamics_state(torch.cat([state, action], dim=1))
-        reward = self.dynamics_reward(torch.cat([state, action], dim=1))
-        done = (reward.item() <= -1000.0)
-        return next_state, reward, done
+    def next_state(self, state, action):
+        next_state = self.dynamics_state(torch.cat([state, action]))
+        reward = self.dynamics_reward(torch.cat([state, action]))
+        return next_state, reward
 
     def policy_value(self, state):
         return self.prediction(state)
 
 class MuZeroAgent:
-    def __init__(self, env, network, device, gamma=0.99):
+    def __init__(self, env, network, device):
         self.env = env
         self.network = network.to(device)
         self.device = device
-        self.gamma = gamma
 
-    def act(self, states, temperature=1.0):
-        print('muzero act: ', states.shape)
-        states = torch.tensor(states, dtype=torch.float32).to(self.device)
-        logits = self.network.policy_value(self.network.initial_states(states))
-        logits = logits.view(-1, self.env.single_action_space.n)
-        probabilities = torch.softmax(logits / temperature, dim=1)
-        actions = torch.multinomial(probabilities, num_samples=1).squeeze().cpu().numpy()
-        return actions
+    def act(self, state, temperature=1.0):
+        state = torch.tensor(state.clone().detach(), dtype=torch.float32).to(self.device)
+        logits = self.network.policy_value(self.network.initial_state(state))
+        probabilities = torch.softmax(logits / temperature, dim=-1)
+        action = torch.multinomial(probabilities, num_samples=1).squeeze().cpu().numpy()
+        return action
     
 class Node:
     def __init__(self, agent, state, reward, done, parent=None, action=None):
         self.agent = agent
         self.state = state
-        self.reward = reward.clone().detach().to(self.agent.device)
-        self.done = done.clone().detach().to(self.agent.device)
+        self.reward = reward
+        self.done = done
 
         self.parent = parent
         self.action = action
@@ -111,36 +105,28 @@ class Node:
         u_value = np.sqrt(self.visit_count) / (1 + child.visit_count)
         p_value = child.reward + child.agent.gamma * q_value
         return p_value + c_puct * u_value
-
     
 class MCTS:
     def __init__(self, agent, num_simulations, discount):
         self.agent = agent
         self.num_simulations = num_simulations
         self.discount = discount
-        self.c = math.sqrt(2) # Exploration constant
 
     def run(self, state):
-        if len(state.shape) == 1:
-            state_tensor = state.clone().detach().unsqueeze(0).to(self.agent.device)
-        else:
-            state_tensor = state.clone().detach().to(self.agent.device)
-        initial_states = self.agent.network.initial_states(state_tensor)
-        root = Node(self.agent, initial_states, torch.tensor(0, dtype=torch.float32).to(self.agent.device), torch.tensor(False, dtype=torch.bool).to(self.agent.device))
-
+        root = Node(self.agent.network.initial_state(state))
 
         for _ in range(self.num_simulations):
-            node, path = self.select_node(root)
-            if not node.is_fully_expanded():
+            node = self.select(root)
+            if not node.children:
                 reward = self.rollout(node)
             else:
                 node.expand()
                 reward = node.children[0].reward
-            self.backpropagate(path, reward)
+            self.backpropagate(node, reward)
 
         return self.choose_best_action(root)
 
-    def select_node(self, node):
+    def select(self, node):
         path = []
         while node.children:
             action, child = max(node.children.items(), key=lambda item: self.uct(item[1], node.visit_count))
@@ -148,80 +134,66 @@ class MCTS:
             node = child
         return node, path
 
+    def expand(self, node):
+        state = node.state
+        if not node.done:
+            for action in range(self.agent.env.action_space.n):
+                next_state, reward = self.agent.network.next_state(state, torch.tensor([action], device=self.agent.device))
+                done = next_state.squeeze().eq(state.squeeze()).all().item()
+                node.children[action] = Node(next_state, reward.item(), done)
 
     def rollout(self, node):
-        if node.is_terminal():
-            return node.reward
+        while not node.is_terminal():
+            legal_actions = node.legal_actions()
 
-        policy_logits = node.agent.network.policy_value(node.state)
-        policy = F.softmax(policy_logits, dim=-1).view(-1).cpu().data.numpy()
-        policy /= policy.sum()
+            if len(legal_actions) == 0:
+                return 0
 
-        action = np.random.choice(len(policy), p=policy)
+            action = self.agent.act(node.state.unsqueeze(0), temperature=0.5, hidden_state=node.state)[0]
+            next_state, reward = self.agent.network.next_states(node.state, torch.tensor([action]))
+            node = Node(next_state.squeeze(0), node, reward)
 
-        if action not in node.children:
-            action_tensor = torch.tensor([action], dtype=torch.float32).to(self.agent.device)
-            next_state, reward, done = self.agent.network.next_states(node.state, action_tensor)
-            child = Node(self.agent, next_state, reward, done, parent=node, action=action)
-            node.children[action] = child
-
-        return node.reward + self.agent.gamma * self.rollout(node.children[action])
-
-    
-    def choose_best_action(self, root):
-        action, _ = max(root.children.items(), key=lambda item: item[1].visit_count)
-        return action
-
+        return node.reward
 
     def backpropagate(self, path, reward):
         for action, node in path:
             node.visit_count += 1
-            node.value_sum += reward
-            node.value = node.value_sum / node.visit_count
-
+            node.total_value += reward
 
     def uct(self, node, parent_visit_count):
-        q = node.value_sum / node.visit_count if node.visit_count else 0
+        q = node.total_value / node.visit_count if node.visit_count else 0
         u = self.c * math.sqrt(math.log(parent_visit_count) / (1 + node.visit_count))
         return q + u
 
 class MCTSAgent(MuZeroAgent):
-    def __init__(self, base_agent, device, num_simulations=50, gamma=0.99):
+    def __init__(self, base_agent, device, num_simulations=50):
         super().__init__(base_agent.env, base_agent.network, device)
         self.num_simulations = num_simulations
         self.base_agent = base_agent
 
-    def act(self, states, temperature=1.0, hidden_state=None):
-        if type(states) is np.ndarray:
-            states = torch.FloatTensor(states).to(self.device)
-        else:
-            states = torch.FloatTensor(states.clone().detach().cpu()).to(self.device)
+    def act(self, state, temperature=1.0, hidden_state=None):
+        state = torch.FloatTensor(state.clone().detach().cpu()).to(self.device)
 
-        if hidden_state is None:
-            hidden_state = self.network.initial_states(states)
-        else:
-            hidden_state = hidden_state.clone().detach().to(self.device)
+        hidden_state = self.network.initial_state(state)
 
+        logits = self.network.policy_value(hidden_state)
+        probabilities = torch.softmax(logits / temperature, dim=-1)
+        action = torch.multinomial(probabilities, num_samples=1).squeeze().cpu().numpy()
 
-        mcts = MCTS(self, self.num_simulations, self.base_agent.gamma)
-        best_action = mcts.run(states)
-        actions = np.array([best_action])
+        return action
 
-        return actions
-
-
-def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs, num_simulations, discount):
-    env = gym.vector.make(env_name, num_envs=num_envs)
-    input_shape = env.single_observation_space.shape
-    action_space_size = env.single_action_space.n
+def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_simulations, discount):
+    env = gym.make(env_name)
+    input_shape = env.observation_space.shape
+    action_space_size = env.action_space.n
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     network = MuZeroNetwork(input_shape, action_space_size).to(device)
-    agent = MuZeroAgent(env, network, device, gamma=0.99)
-    mcts_agent = MCTSAgent(agent, device, num_simulations)
+    agent = MuZeroAgent(env, network, device)
+    agent = MCTSAgent(agent, device, num_simulations)
 
     optimizer = optim.Adam(network.parameters(), lr=learning_rate)
-    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5)
+    lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.0125)
     replay_buffer = deque(maxlen=replay_buffer_size)
 
     best_eval_reward = float('-inf')
@@ -230,24 +202,17 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs, 
 
     for epoch in range(epochs):
         # Generate data using MCTS and store it in the replay buffer
-        states, _ = env.reset()
-        dones = np.array([False] * num_envs)
-        completed_episodes = 0
+        state, _ = env.reset()
+        done = False
 
-        while completed_episodes < num_envs:
-            # actions = []
-            for state in states:
-                actions = mcts_agent.act(torch.tensor(states, dtype=torch.float32).to(device))
-                next_states, rewards, new_dones, _, _ = env.step(actions)
+        while not done:
+            action = agent.act(torch.tensor(state, dtype=torch.float32).to(device))
+            next_state, reward, new_done, _, _ = env.step(action)
             
-            for state, action, reward, done, next_state, new_done in zip(states, actions, rewards, dones, next_states, new_dones):
-                if not done:
-                    replay_buffer.append((state, action, reward))
-                    if new_done:
-                        completed_episodes += 1
+            replay_buffer.append((state, action, reward))
 
-            states = next_states
-            dones = new_dones
+            state = next_state
+            done = new_done
 
         # Train the network using data from the replay buffer
         if len(replay_buffer) == replay_buffer_size:
@@ -255,30 +220,30 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs, 
             loss = 0
 
             for state, action, reward in replay_buffer:
-                state = torch.tensor(state, dtype=torch.float32).to(device).unsqueeze(0)
-                action = torch.tensor([action], dtype=torch.long).to(device)
-                reward = torch.tensor([reward], dtype=torch.float32).to(device)
+                state = torch.tensor(state, dtype=torch.float32).to(device)
+                action = torch.tensor(action, dtype=torch.long).to(device).unsqueeze(0)
+                reward = torch.tensor(reward, dtype=torch.float32).to(device)
 
                 # Compute target value
                 with torch.no_grad():
-                    next_state, _ = agent.network.next_states(agent.network.initial_states(state), action)
-                    target_value = reward + agent.network.policy_value(next_state).max().unsqueeze(0)
-
+                    next_state, _ = agent.network.next_state(agent.network.initial_state(state), action)
+                    target_value = reward + agent.network.policy_value(next_state)
 
                 # Compute predicted value
-                predicted_value = agent.network.policy_value(agent.network.initial_states(state)).gather(1, action.unsqueeze(1))
+                predicted_value = agent.network.policy_value(agent.network.initial_state(state))
 
                 # Compute loss and accumulate gradients
-                loss += F.mse_loss(predicted_value.squeeze(0), target_value)
+                loss += F.mse_loss(predicted_value, target_value)
 
             loss.backward()
             optimizer.step()
 
-            eval_reward = evaluate_agent(agent, env_name, num_episodes=5)
+            eval_reward = evaluate_agent(agent, env_name)
             print(f"Epoch {epoch}: Evalu reward = {eval_reward}, learning rate = {optimizer.param_groups[0]['lr']}, loss = {loss.item()}")
 
             if eval_reward > best_eval_reward:
                 best_eval_reward = eval_reward
+                print('new best!')
                 torch.save(network.state_dict(), "best_muzero_model.pt")
                 early_stopping_counter = 0
             else:
@@ -289,51 +254,63 @@ def train_muzero(env_name, epochs, learning_rate, replay_buffer_size, num_envs, 
             
             lr_scheduler.step(eval_reward)
             # Logging
-            if epoch % 100 == 0:
-                print(f"Epoch {epoch}: Loss = {loss.item()}")
+            print(f"Epoch {epoch}: Loss = {loss.mean()}")
 
-    return mcts_agent
+    return agent
 
-def evaluate_agent(agent, env_name, num_episodes):
-    env = gym.vector.make(env_name, num_episodes)
-    total_rewards = np.zeros(num_episodes)
-    states, _ = env.reset()
-    dones = np.array([False] * num_episodes)
+def evaluate_agent(agent, env_name):
+    env = gym.make(env_name)
+    total_reward = 0
+    state, _ = env.reset()
+    done = False
 
-    while not np.all(dones):
-        actions = agent.act(states, temperature=0.001)
-        states, rewards, new_dones, _, _ = env.step(actions)
-        total_rewards += rewards * ~dones
-        dones = np.logical_or(dones, new_dones)
+    while not done:
+        action = agent.act(torch.tensor(state, dtype=torch.float32), temperature=0.001)
+        state, reward, new_done, _, _ = env.step(action)
+        total_reward += reward
+        done = new_done
 
-    return total_rewards.mean()
+    return total_reward
 
 def test_agent(agent, env_name, episodes):
     env = gym.make(env_name, render_mode="human")
 
     for episode in range(episodes):
 
-        states, _ = env.reset()
-        
-        dones = False
-        total_rewards = 0
+        state, _ = env.reset()
+        env.render()
+        done = False
+        total_reward = 0
 
-        while not np.all(dones):
-            env.render()
-            actions = agent.act(states, temperature=0.001)
-            states, rewards, dones, _, _ = env.step(actions)
-            total_rewards += rewards
+        while not done:
+            action = agent.act(torch.tensor(state, dtype=torch.float32), temperature=0.001)
+            state, reward, done, _, _ = env.step(action)
+            total_reward += reward
 
-        print(f"Episode {episode + 1}: Total reward = {total_rewards}")
+        print(f"Episode {episode + 1}: Total reward = {total_reward}")
     env.close()
+
+def load_model(model_path):
+    env_name = "LunarLander-v2"
+    env = gym.make(env_name)
+    input_shape = env.observation_space.shape
+    action_space_size = env.action_space.n
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    network = MuZeroNetwork(input_shape, action_space_size).to(device)
+    network.load_state_dict(torch.load(model_path))
+    agent = MuZeroAgent(env, network, device)
+    agent = MCTSAgent(agent, device, num_simulations=50)
+
+    return agent
 
 if __name__ == "__main__":
     env_name = "LunarLander-v2"
-    epochs = 50
+    epochs = 2000
     learning_rate = 0.1
-    replay_buffer_size = 2500
-
-    agent = train_muzero(env_name, epochs, learning_rate, replay_buffer_size, 2, 50, 1)
+    replay_buffer_size = 1000
+    agent = load_model("muzero_model.pt")
+    agent = train_muzero(env_name, epochs, learning_rate, replay_buffer_size, 50, 1)
     test_agent(agent, env_name, episodes=10)
 
     model_save_path = "muzero_model.pt"
